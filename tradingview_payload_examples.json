@@ -1,0 +1,38 @@
+{
+  "btc_buy_breakout": {
+    "symbol": "BTC/USD",
+    "side": "buy",
+    "entry": "Break 119200",
+    "sl": "118000",
+    "tp1": "121500",
+    "tp2": "123000",
+    "timeframe": "H1",
+    "confidence": "High",
+    "reason": "Breakout H1 + volume",
+    "risk": 1.0
+  },
+  "eth_buy_retest": {
+    "symbol": "ETH/USD",
+    "side": "buy",
+    "entry": "Rebound 4200",
+    "sl": "4100",
+    "tp1": "4380",
+    "tp2": "4500",
+    "timeframe": "H1",
+    "confidence": "Medium",
+    "reason": "Rebond support + tendance haussière",
+    "risk": 1.0
+  },
+  "xau_buy_pullback": {
+    "symbol": "XAU/USD",
+    "side": "buy",
+    "entry": "Pullback 3380",
+    "sl": "3345",
+    "tp1": "3420",
+    "tp2": "3435",
+    "timeframe": "H1",
+    "confidence": "Medium",
+    "reason": "Reversal haussier au support",
+    "risk": 1.0
+  }
+}
