@@ -53,3 +53,11 @@ async def webhook(request: Request):
             raise HTTPException(status_code=500, detail="Failed to send message to Telegram")
 
     return {"ok": True}
+    @app.get("/manual-signal")
+async def manual_signal(text: str):
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            BOT_API_URL,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": text}
+        )
+    return {"status": "sent", "message": text}
