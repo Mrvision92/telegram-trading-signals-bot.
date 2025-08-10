@@ -82,3 +82,32 @@ async def manual_signal(body: dict):
     text = format_signal_message(body)
     await send_telegram(text)
     return {"status": "sent"}
+# Route de test pour vérifier que l'app est en ligne
+@app.get("/health")
+def health_check():
+    return {"ok": True}
+
+# Route pour recevoir les signaux
+@app.post("/webhook")
+async def webhook(request: Request):
+    # Vérification du token secret dans l'en-tête Authorization
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    token = auth_header.split(" ")[1]
+    if token != SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid secret token")
+
+    # Récupération des données envoyées
+    payload = await request.json()
+
+    # Envoi du message formaté au canal Telegram
+    message = format_signal_message(payload)
+    async with httpx.AsyncClient() as client:
+        await client.post(
+            BOT_API_URL,
+            data={"chat_id": TELEGRAM_CHAT_ID, "text": message}
+        )
+
+    return {"status": "Signal sent to Telegram"}
