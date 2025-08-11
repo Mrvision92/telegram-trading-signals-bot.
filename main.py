@@ -1,83 +1,128 @@
-import os
-from fastapi import FastAPI, Request, HTTPException
+import os, json, asyncio
+from typing import Any, Dict, Optional
+from fastapi import FastAPI, Request, HTTPException, Query
 import httpx
-import uvicorn
 
-# ========= Config =========
-TELEGRAM_BOT_TOKEN = "7717198300:AAFw4OzeOAjC6dp9-2sD4VB8oy0f3R9_31E"
-TELEGRAM_CHAT_ID   = "1382648204"
-WEBHOOK_SECRET     = "abc123"  # change-le si tu veux
+# --- Env ---
+BOT_TOKEN  = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID    = os.environ["TELEGRAM_CHAT_ID"]
+SECRET     = os.environ.get("SECRET_TOKEN", "abc123")  # même valeur que dans l’URL TradingView
 
-BOT_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+BOT_API = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-app = FastAPI()
+app = FastAPI(title="TV → Telegram bridge")
 
-async def send_telegram(message: str):
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        r = await client.post(BOT_API_URL, data={"chat_id": TELEGRAM_CHAT_ID, "text": message})
+# --------- Utils ----------
+def base_symbol(tv_symbol: str) -> str:
+    """
+    Convertit un symbole TradingView en base symbol pour les news (BTCUSD -> BTC).
+    """
+    s = tv_symbol.upper()
+    for suffix in ("USD", "USDT", "EUR", "PERP", ".P", ".D"):
+        if s.endswith(suffix):
+            return s.replace(suffix, "")
+    # Ex: XAUUSD -> XAU (3 premières lettres)
+    if len(s) >= 3:
+        return s[:3]
+    return s
+
+def num(x: Any) -> Optional[float]:
+    try:
+        return float(x)
+    except Exception:
+        return None
+
+def fmt_price(x: Any) -> str:
+    try:
+        return f"{float(x):,.2f}".replace(",", " ").replace(".00", "")
+    except Exception:
+        return str(x)
+
+async def send_telegram(text: str) -> None:
+    payload = {
+        "chat_id": CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
+    async with httpx.AsyncClient(timeout=20) as client:
+        r = await client.post(BOT_API, json=payload)
         r.raise_for_status()
 
-@app.get("/")
-@app.get("/health")
-async def health():
+def build_human_message(msg: Dict[str, Any]) -> str:
+    """
+    Construit un message Telegram propre à partir du message JSON reçu de Pine.
+    Le message Pine attendu ressemble à :
+    {
+      "symbol":"BTCUSD","timeframe":"4H","side":"BUY",
+      "entry": "59250", "sl":"58500","tp1":"60200","tp2":"61800",
+      "confidence": "82","ctx":"breakout+ema+vol"
+    }
+    """
+    symbol     = str(msg.get("symbol", ""))
+    tf         = str(msg.get("timeframe", ""))
+    side       = str(msg.get("side", "")).upper()
+    entry      = fmt_price(msg.get("entry"))
+    sl         = fmt_price(msg.get("sl"))
+    tp1        = fmt_price(msg.get("tp1"))
+    tp2        = fmt_price(msg.get("tp2"))
+    conf       = num(msg.get("confidence"))
+    conf_str   = f"{int(conf)}%" if conf is not None else "—"
+    ctx        = str(msg.get("ctx", ""))
+
+    # Emoji direction
+    arrow = "🟢 BUY" if side == "BUY" else "🔴 SELL" if side == "SELL" else "⚪"
+
+    text = (
+        f"*{arrow} — {symbol} ({tf})*\n"
+        f"• *Entrée* : `{entry}`\n"
+        f"• *SL*     : `{sl}`\n"
+        f"• *TP1*    : `{tp1}`\n"
+        f"• *TP2*    : `{tp2}`\n"
+        f"• *Confiance* : *{conf_str}*\n"
+        f"• *Contexte* : `{ctx}`"
+    )
+    return text
+
+def extract_signal(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    TradingView envoie un JSON avec un champ 'message' (string).
+    Ce 'message' contient notre JSON formaté par Pine.
+    """
+    if "message" in payload and isinstance(payload["message"], str):
+        try:
+            return json.loads(payload["message"])
+        except Exception:
+            # si ce n’est pas un JSON : on tente de parser clé=val ; sinon raw
+            return {"raw_message": payload["message"]}
+    return payload
+
+# --------- Routes ----------
+@app.get("/healthz")
+async def healthz():
     return {"ok": True}
 
-def extract_message_from_request_body(raw: bytes) -> str | None:
-    """
-    Essaie d'extraire un message depuis le corps de la requête.
-    - JSON TradingView typique: {"message":"..."} ou {"text":"..."}
-    - Texte brut: b"..."
-    - Vide: None
-    """
-    if not raw:
-        return None
-    try:
-        import json
-        data = json.loads(raw.decode("utf-8", errors="ignore"))
-        # TradingView peut utiliser "message" ou "text"
-        msg = data.get("message") or data.get("text")
-        if isinstance(msg, str) and msg.strip():
-            return msg.strip()
-    except Exception:
-        # pas du JSON: traiter comme texte brut
-        txt = raw.decode("utf-8", errors="ignore").strip()
-        if txt:
-            return txt
-    return None
+@app.get("/manual-signal")
+async def manual_signal(text: str = "Hello depuis Render"):
+    await send_telegram(text)
+    return {"ok": True, "sent": text}
 
-# Accepte GET et POST pour éviter le "Method Not Allowed"
-@app.get("/webhook")
 @app.post("/webhook")
-async def webhook(request: Request, secret: str | None = None, text: str | None = None):
-    # 1) Vérif du secret (dans l'URL)
-    if secret != WEBHOOK_SECRET:
+async def webhook(request: Request, secret: str = Query(None)):
+    if secret != SECRET:
         raise HTTPException(status_code=403, detail="Invalid secret")
 
-    # 2) Récup du message
-    raw = await request.body()
-    body_msg = extract_message_from_request_body(raw)
-    query_msg = (text or "").strip() if text else None
+    data = await request.json()
+    signal = extract_signal(data)
+    # si on n’a pas du JSON structuré, on envoie brut pour debug
+    if "symbol" not in signal:
+        await send_telegram(f"⚠️ Payload non structuré :\n\n`{json.dumps(signal, ensure_ascii=False)}`")
+        return {"ok": True, "note": "unstructured"}
 
-    message = body_msg or query_msg or "🚀 Nouveau signal détecté (aucun texte fourni)."
+    text = build_human_message(signal)
 
-    # 3) Log utile pour debug
-    try:
-        print("WEBHOOK",
-              {"method": request.method,
-               "content_type": request.headers.get("content-type"),
-               "len": len(raw) if raw else 0,
-               "sample": (raw[:120] if raw else b"").decode("utf-8", errors="ignore")})
-    except Exception:
-        pass
+    # (Optionnel) ici on pourrait enrichir avec des news si tu ajoutes un service
+    # ex : news = await fetch_news(base_symbol(signal["symbol"]))
+    # puis text += "\n\n📰 " + news[0]["title"]
 
-    # 4) Envoi Telegram
-    try:
-        await send_telegram(message)
-    except httpx.HTTPError as e:
-        raise HTTPException(status_code=502, detail=f"Telegram send failed: {e}") from e
-
-    return {"status": "sent", "message": message}
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8000"))  # Render injecte PORT
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    await send_telegram(text)
+    return {"ok": True}
